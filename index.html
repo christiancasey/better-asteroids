@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Asteroids</title>
+<style>
+  :root { color-scheme: dark; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #000;
+    overflow: hidden;
+    touch-action: none;
+    overscroll-behavior: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  #game { display: block; position: fixed; inset: 0; background: #000; touch-action: none; }
+
+  #hud {
+    position: fixed; top: 14px; left: 16px;
+    color: #cfd8e6; font-size: 14px; letter-spacing: 2px;
+    text-shadow: 0 0 8px rgba(140,185,255,0.5);
+    pointer-events: none; line-height: 1.5;
+  }
+  #hud .score { font-size: 26px; color: #fff; letter-spacing: 1px; }
+
+  #mute {
+    position: fixed; top: 14px; right: 16px; z-index: 6;
+    pointer-events: auto;
+    background: rgba(255,255,255,0.05);
+    border: 1.5px solid rgba(160,190,230,0.45);
+    color: #cfd8e6; font-family: inherit; font-size: 12px; letter-spacing: 2px;
+    padding: 7px 12px; border-radius: 8px; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #mute:hover { background: rgba(160,190,230,0.18); }
+  #mute.off { color: #7a8494; border-color: rgba(160,190,230,0.25); }
+
+  #hint {
+    position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+    color: #5f6a7c; font-size: 12px; letter-spacing: 1px; text-align: center;
+    pointer-events: none; white-space: nowrap;
+  }
+  #paused {
+    position: fixed; inset: 0; display: none;
+    align-items: center; justify-content: center;
+    color: #fff; font-size: 34px; letter-spacing: 8px;
+    background: rgba(0,0,0,0.45); pointer-events: none;
+  }
+
+  /* On-screen controls, shown only on touch devices */
+  #touch { display: none; }
+  @media (pointer: coarse) {
+    #touch { display: block; position: fixed; inset: 0; pointer-events: none; z-index: 5; }
+    #hint { display: none; }
+    .btn {
+      position: fixed; pointer-events: auto; touch-action: none;
+      width: 74px; height: 74px; border-radius: 50%;
+      border: 1.5px solid rgba(160,190,230,0.5);
+      background: rgba(255,255,255,0.05);
+      color: #cfd8e6; font-size: 13px; letter-spacing: 1px;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .btn:active { background: rgba(160,190,230,0.28); }
+    #b-left   { left: 18px;  bottom: 28px; }
+    #b-right  { left: 106px; bottom: 28px; }
+    #b-thrust { right: 106px; bottom: 70px; }
+    #b-fire   { right: 18px;  bottom: 28px; width: 88px; height: 88px; }
+    #b-hyper  { left: 50%; transform: translateX(-50%); bottom: 24px; width: 58px; height: 58px; font-size: 11px; }
+  }
+</style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+
+  <div id="hud">
+    <div class="score" id="score">0</div>
+    <div id="wave">WAVE 1</div>
+  </div>
+
+  <button id="mute" aria-label="Toggle sound">SOUND ON</button>
+
+  <div id="hint">ROTATE &larr; &rarr; &nbsp; THRUST &uarr; &nbsp; FIRE SPACE &nbsp; HYPERSPACE H &nbsp; PAUSE P &nbsp; MUTE M</div>
+  <div id="paused">PAUSED</div>
+
+  <div id="touch">
+    <div class="btn" id="b-left">&#9664;</div>
+    <div class="btn" id="b-right">&#9654;</div>
+    <div class="btn" id="b-thrust">THRUST</div>
+    <div class="btn" id="b-fire">FIRE</div>
+    <div class="btn" id="b-hyper">JUMP</div>
+  </div>
+
+<script>
+"use strict";
+
+// Single-page Asteroids. No alien saucers, lives are infinite (a hit destroys
+// the ship, then it respawns at center with a brief shield), and all sound is
+// synthesized with the Web Audio API so the file needs no external assets.
+
+// ---- Canvas setup -------------------------------------------------------
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const scoreEl = document.getElementById("score");
+const waveEl = document.getElementById("wave");
+const pausedEl = document.getElementById("paused");
+const muteEl = document.getElementById("mute");
+let W = 0, H = 0;
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = Math.floor(W * dpr);
+  canvas.height = Math.floor(H * dpr);
+  canvas.style.width = W + "px";
+  canvas.style.height = H + "px";
+  // Draw in CSS pixels, let the transform handle device pixel density.
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener("resize", resize);
+resize();
+
+// ---- Tunable constants --------------------------------------------------
+const ROT_SPEED = 4.4;     // radians per second
+const THRUST = 280;        // acceleration, pixels per second squared
+const FRICTION = 0.5;      // velocity damping per second
+const MAX_SPEED = 480;     // pixels per second cap
+const BULLET_SPEED = 520;  // muzzle speed, pixels per second
+const BULLET_LIFE = 2;   // seconds before a shot fades
+const FIRE_DELAY = 0.01;   // seconds between shots
+const MAX_BULLETS = 500;     // shots allowed on screen at once
+const SHIP_BOUND = 15;     // ship bounding radius (nose reach), used for broad-phase
+const INVULN_TIME = 2.5;   // shield duration after respawn
+const RESPAWN_DELAY = 1.4; // seconds dead before respawning
+const TRAIL_TIME = 10.0;     // seconds the ship's vapor trail lingers
+const ASTEROID_NOTCH = 0.2; // share of rock vertices cut into deep concave notches
+
+const SIZE_RADIUS = { 3: 48, 2: 26, 1: 14 };
+const SIZE_SCORE  = { 3: 20, 2: 50, 1: 100 };
+
+// Ship outline in local space, nose pointing along +x. Single source of truth
+// for both the drawn shape and the collision polygon so the two cannot drift.
+const SHIP_SHAPE = [
+  { x: 15, y: 0 },
+  { x: -11, y: -9 },
+  { x: -6, y: 0 },
+  { x: -11, y: 9 },
+];
+
+// ---- Game state ---------------------------------------------------------
+let ship, bullets, asteroids, particles, trail;
+let score = 0, wave = 0, fireCooldown = 0, paused = false;
+
+function rand(min, max) { return min + Math.random() * (max - min); }
+
+// ---- Audio --------------------------------------------------------------
+let actx = null;
+let masterGain = null;
+let thrustGain = null;
+let noiseBuf = null;
+let muted = false;
+
+function initAudio() {
+  if (actx) return;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  actx = new AC();
+
+  masterGain = actx.createGain();
+  masterGain.gain.value = 0.5;
+  // A compressor keeps stacked sounds from clipping.
+  const comp = actx.createDynamicsCompressor();
+  masterGain.connect(comp);
+  comp.connect(actx.destination);
+
+  // One reusable buffer of white noise drives explosions and the thruster.
+  noiseBuf = actx.createBuffer(1, Math.floor(actx.sampleRate * 1.0), actx.sampleRate);
+  const data = noiseBuf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+
+  // Persistent thruster rumble, silent until thrust is applied.
+  thrustGain = actx.createGain();
+  thrustGain.gain.value = 0;
+  const lp = actx.createBiquadFilter();
+  lp.type = "lowpass";
+  lp.frequency.value = 420;
+  const src = actx.createBufferSource();
+  src.buffer = noiseBuf;
+  src.loop = true;
+  src.connect(lp);
+  lp.connect(thrustGain);
+  thrustGain.connect(masterGain);
+  src.start();
+}
+
+// Browsers start audio suspended until a user gesture, so resume on input.
+function resumeAudio() {
+  if (!actx) initAudio();
+  if (actx && actx.state === "suspended") actx.resume();
+}
+
+function tone(freq, dur, type, gain, sweepTo) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator();
+  const g = actx.createGain();
+  o.type = type;
+  o.frequency.setValueAtTime(freq, t);
+  if (sweepTo) o.frequency.exponentialRampToValueAtTime(sweepTo, t + dur);
+  g.gain.setValueAtTime(gain, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g);
+  g.connect(masterGain);
+  o.start(t);
+  o.stop(t + dur);
+}
+
+function noise(dur, gain, filterFreq, filterType) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const src = actx.createBufferSource();
+  src.buffer = noiseBuf;
+  const f = actx.createBiquadFilter();
+  f.type = filterType || "lowpass";
+  f.frequency.value = filterFreq;
+  const g = actx.createGain();
+  g.gain.setValueAtTime(gain, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  src.connect(f);
+  f.connect(g);
+  g.connect(masterGain);
+  src.start(t);
+  src.stop(t + dur);
+}
+
+// Individual game sounds.
+function fireSound() { tone(720, 0.12, "square", 0.10, 180); }
+function bang(size) { noise(0.18 + size * 0.09, 0.35, 300 + (3 - size) * 360, "lowpass"); }
+function shipBoom() { noise(0.6, 0.4, 700, "lowpass"); tone(180, 0.5, "sawtooth", 0.18, 45); }
+function hyperSound() { tone(300, 0.25, "sine", 0.16, 1500); noise(0.2, 0.1, 1200, "bandpass"); }
+function beatTone(freq) { tone(freq, 0.14, "triangle", 0.3); }
+
+function setThrustSound(on) {
+  if (!actx || !thrustGain) return;
+  const target = (on && !muted) ? 0.14 : 0;
+  thrustGain.gain.setTargetAtTime(target, actx.currentTime, 0.02);
+}
+
+function setMuted(m) {
+  muted = m;
+  if (thrustGain && actx) thrustGain.gain.setTargetAtTime(0, actx.currentTime, 0.02);
+  muteEl.textContent = muted ? "SOUND OFF" : "SOUND ON";
+  muteEl.classList.toggle("off", muted);
+}
+
+// The signature two-tone beat speeds up as the field is cleared.
+let beatAccum = 0;
+let beatHigh = false;
+let waveMaxLoad = 1;
+
+function asteroidLoad() {
+  // Shots remaining to clear the field. Decreases by one per hit because a
+  // split rock is worth one less than its parent, giving a smooth tempo ramp.
+  let s = 0;
+  for (const a of asteroids) s += a.size === 3 ? 7 : a.size === 2 ? 3 : 1;
+  return s;
+}
+
+function updateBeat(dt) {
+  if (asteroids.length === 0) return;
+  const frac = waveMaxLoad > 0 ? asteroidLoad() / waveMaxLoad : 0;
+  const interval = 0.32 + frac * 0.78; // slow when full, fast as it empties
+  beatAccum += dt;
+  if (beatAccum >= interval) {
+    beatAccum = 0;
+    beatHigh = !beatHigh;
+    beatTone(beatHigh ? 130 : 98);
+  }
+}
+
+// ---- Entities -----------------------------------------------------------
+function newShip() {
+  return {
+    x: W / 2, y: H / 2,
+    vx: 0, vy: 0,
+    angle: -Math.PI / 2, // nose pointing up
+    alive: true,
+    thrusting: false,
+    invuln: INVULN_TIME,
+    respawn: 0,
+  };
+}
+
+function makeAsteroid(x, y, size) {
+  const r = SIZE_RADIUS[size];
+  const speed = rand(38, 70) * (1 + (3 - size) * 0.45); // smaller rocks move faster
+  const dir = rand(0, Math.PI * 2);
+  // Pre-generate a jagged outline so every rock looks distinct. Each vertex
+  // stays inside its own angular slice so edges never cross, and a share of
+  // them are pulled in deep to cut the sharp concave notches of the original.
+  const n = 10 + Math.floor(Math.random() * 4);
+  const step = (Math.PI * 2) / n;
+  const verts = [];
+  for (let i = 0; i < n; i++) {
+    const a = i * step + rand(0.15, 0.85) * step;
+    const d = Math.random() < ASTEROID_NOTCH
+      ? r * rand(0.46, 0.66)   // deep valley
+      : r * rand(0.86, 1.06);  // outer peak
+    verts.push({ a, d });
+  }
+  return {
+    x, y, size, r, verts,
+    vx: Math.cos(dir) * speed,
+    vy: Math.sin(dir) * speed,
+    rot: rand(0, Math.PI * 2),
+    rotSpeed: rand(-0.8, 0.8),
+  };
+}
+
+function spawnWave() {
+  wave++;
+  const count = Math.min(3 + wave, 9);
+  asteroids = [];
+  for (let i = 0; i < count; i++) {
+    // Keep new rocks away from the ship's start position.
+    let x, y, tries = 0;
+    do {
+      x = rand(0, W);
+      y = rand(0, H);
+      tries++;
+    } while (tries < 50 && Math.hypot(x - ship.x, y - ship.y) < 220);
+    asteroids.push(makeAsteroid(x, y, 3));
+  }
+  waveMaxLoad = asteroidLoad();
+  beatAccum = 0;
+}
+
+function explode(x, y, count, spread) {
+  for (let i = 0; i < count; i++) {
+    const a = rand(0, Math.PI * 2);
+    const s = rand(40, spread);
+    particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: rand(0.35, 0.9), max: 0.9 });
+  }
+}
+
+function resetGame() {
+  ship = newShip();
+  bullets = [];
+  particles = [];
+  asteroids = [];
+  trail = [];
+  score = 0;
+  wave = 0;
+  spawnWave();
+}
+
+// ---- Input --------------------------------------------------------------
+const keys = {};
+window.addEventListener("keydown", (e) => {
+  resumeAudio();
+  if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Space"].includes(e.code)) {
+    e.preventDefault(); // stop the page from scrolling while playing
+  }
+  if (e.repeat) return;
+  if (e.code === "KeyH") hyperspace();
+  if (e.code === "KeyP") paused = !paused;
+  if (e.code === "KeyM") setMuted(!muted);
+  keys[e.code] = true;
+});
+window.addEventListener("keyup", (e) => { keys[e.code] = false; });
+
+// Touch buttons set the same key flags the keyboard uses.
+function bindButton(id, code) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const down = (e) => { e.preventDefault(); resumeAudio(); keys[code] = true; };
+  const up = (e) => { e.preventDefault(); keys[code] = false; };
+  el.addEventListener("pointerdown", down);
+  el.addEventListener("pointerup", up);
+  el.addEventListener("pointercancel", up);
+  el.addEventListener("pointerleave", up);
+}
+bindButton("b-left", "ArrowLeft");
+bindButton("b-right", "ArrowRight");
+bindButton("b-thrust", "ArrowUp");
+bindButton("b-fire", "Space");
+const hyperBtn = document.getElementById("b-hyper");
+if (hyperBtn) hyperBtn.addEventListener("pointerdown", (e) => { e.preventDefault(); resumeAudio(); hyperspace(); });
+
+muteEl.addEventListener("click", () => { resumeAudio(); setMuted(!muted); });
+
+function hyperspace() {
+  if (!ship.alive) return;
+  ship.x = rand(0, W);
+  ship.y = rand(0, H);
+  ship.vx = 0;
+  ship.vy = 0;
+  ship.invuln = Math.max(ship.invuln, 1.0);
+  hyperSound();
+}
+
+// ---- Helpers ------------------------------------------------------------
+function wrap(o) {
+  if (o.x < 0) o.x += W; else if (o.x > W) o.x -= W;
+  if (o.y < 0) o.y += H; else if (o.y > H) o.y -= H;
+}
+
+function fireBullet() {
+  bullets.push({
+    x: ship.x + Math.cos(ship.angle) * 14,
+    y: ship.y + Math.sin(ship.angle) * 14,
+    vx: ship.vx + Math.cos(ship.angle) * BULLET_SPEED,
+    vy: ship.vy + Math.sin(ship.angle) * BULLET_SPEED,
+    life: BULLET_LIFE,
+  });
+  fireSound();
+}
+
+function shipHit() {
+  explode(ship.x, ship.y, 34, 260);
+  shipBoom();
+  ship.alive = false;
+  ship.thrusting = false;
+  ship.respawn = RESPAWN_DELAY;
+}
+
+// ---- Collision geometry -------------------------------------------------
+// Asteroids are concave, so collisions test the real polygon outline instead
+// of a bounding circle. A bullet is treated as a point (point-in-polygon), and
+// the ship is a small polygon checked for overlap against each rock.
+
+function asteroidPoints(a) {
+  const pts = [];
+  for (const v of a.verts) {
+    pts.push({
+      x: a.x + Math.cos(v.a + a.rot) * v.d,
+      y: a.y + Math.sin(v.a + a.rot) * v.d,
+    });
+  }
+  return pts;
+}
+
+function shipPoints() {
+  const c = Math.cos(ship.angle), s = Math.sin(ship.angle);
+  return SHIP_SHAPE.map((p) => ({
+    x: ship.x + p.x * c - p.y * s,
+    y: ship.y + p.x * s + p.y * c,
+  }));
+}
+
+function pointInPolygon(px, py, pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const xi = pts[i].x, yi = pts[i].y, xj = pts[j].x, yj = pts[j].y;
+    if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function orient(p, q, r) {
+  return (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+}
+
+function segmentsCross(p1, p2, p3, p4) {
+  const o1 = orient(p1, p2, p3);
+  const o2 = orient(p1, p2, p4);
+  const o3 = orient(p3, p4, p1);
+  const o4 = orient(p3, p4, p2);
+  return ((o1 > 0) !== (o2 > 0)) && ((o3 > 0) !== (o4 > 0));
+}
+
+// True if two simple polygons overlap. Works for concave shapes: crossing edges
+// catch every partial overlap, and a single point test catches full containment.
+function polygonsOverlap(A, B) {
+  for (let i = 0; i < A.length; i++) {
+    const a1 = A[i], a2 = A[(i + 1) % A.length];
+    for (let j = 0; j < B.length; j++) {
+      const b1 = B[j], b2 = B[(j + 1) % B.length];
+      if (segmentsCross(a1, a2, b1, b2)) return true;
+    }
+  }
+  return pointInPolygon(A[0].x, A[0].y, B) || pointInPolygon(B[0].x, B[0].y, A);
+}
+
+// Does the ship overlap any rock? A bounding-circle pass skips rocks too far
+// for the polygons to touch before the precise test runs.
+function shipCollides() {
+  const sp = shipPoints();
+  for (const a of asteroids) {
+    if (Math.hypot(ship.x - a.x, ship.y - a.y) > a.r * 1.08 + SHIP_BOUND) continue;
+    if (polygonsOverlap(sp, asteroidPoints(a))) return true;
+  }
+  return false;
+}
+
+// ---- Update -------------------------------------------------------------
+function update(dt) {
+  if (ship.alive) {
+    if (keys.ArrowLeft || keys.KeyA) ship.angle -= ROT_SPEED * dt;
+    if (keys.ArrowRight || keys.KeyD) ship.angle += ROT_SPEED * dt;
+
+    ship.thrusting = !!(keys.ArrowUp || keys.KeyW);
+    if (ship.thrusting) {
+      ship.vx += Math.cos(ship.angle) * THRUST * dt;
+      ship.vy += Math.sin(ship.angle) * THRUST * dt;
+    }
+
+    // Mild drag, then clamp top speed.
+    const damp = Math.exp(-FRICTION * dt);
+    ship.vx *= damp;
+    ship.vy *= damp;
+    const sp = Math.hypot(ship.vx, ship.vy);
+    if (sp > MAX_SPEED) {
+      ship.vx = ship.vx / sp * MAX_SPEED;
+      ship.vy = ship.vy / sp * MAX_SPEED;
+    }
+
+    ship.x += ship.vx * dt;
+    ship.y += ship.vy * dt;
+    wrap(ship);
+    // Record the path for the vapor trail.
+    trail.push({ x: ship.x, y: ship.y, life: TRAIL_TIME });
+
+    fireCooldown -= dt;
+    if (keys.Space && fireCooldown <= 0 && bullets.length < MAX_BULLETS) {
+      fireBullet();
+      fireCooldown = FIRE_DELAY;
+    }
+  } else {
+    // Lives are infinite, so the ship always comes back.
+    ship.respawn -= dt;
+    if (ship.respawn <= 0) {
+      ship.x = W / 2; ship.y = H / 2;
+      ship.vx = 0; ship.vy = 0;
+      ship.angle = -Math.PI / 2;
+      ship.alive = true;
+      ship.invuln = INVULN_TIME;
+    }
+  }
+
+  // Shield timer. Do not drop it while the ship still overlaps a rock.
+  if (ship.invuln > 0) {
+    ship.invuln -= dt;
+    if (ship.invuln <= 0 && shipCollides()) {
+      ship.invuln = 0.4;
+    }
+  }
+
+  // Bullets
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    wrap(b);
+    b.life -= dt;
+    if (b.life <= 0) bullets.splice(i, 1);
+  }
+
+  // Asteroids
+  for (const a of asteroids) {
+    a.x += a.vx * dt;
+    a.y += a.vy * dt;
+    a.rot += a.rotSpeed * dt;
+    wrap(a);
+  }
+
+  // Particles
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    const d = Math.exp(-1.6 * dt);
+    p.vx *= d; p.vy *= d;
+    p.life -= dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+
+  // Age the vapor trail and drop expired points from the tail end.
+  for (const p of trail) p.life -= dt;
+  while (trail.length && trail[0].life <= 0) trail.shift();
+
+  // Bullet vs asteroid
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    for (let j = asteroids.length - 1; j >= 0; j--) {
+      const b = bullets[i], a = asteroids[j];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const reach = a.r * 1.08; // cheap pass before the exact point-in-polygon test
+      if (dx * dx + dy * dy < reach * reach && pointInPolygon(b.x, b.y, asteroidPoints(a))) {
+        bullets.splice(i, 1);
+        score += SIZE_SCORE[a.size];
+        explode(a.x, a.y, 8 + a.size * 4, 150);
+        bang(a.size);
+        if (a.size > 1) {
+          asteroids.push(makeAsteroid(a.x, a.y, a.size - 1));
+          asteroids.push(makeAsteroid(a.x, a.y, a.size - 1));
+        }
+        asteroids.splice(j, 1);
+        break; // this shot is spent
+      }
+    }
+  }
+
+  // Ship vs asteroid
+  if (ship.alive && ship.invuln <= 0 && shipCollides()) {
+    shipHit();
+  }
+
+  // Clear the field, advance the wave.
+  if (asteroids.length === 0) spawnWave();
+
+  setThrustSound(ship.alive && ship.thrusting);
+  updateBeat(dt);
+}
+
+// ---- Render -------------------------------------------------------------
+function drawShip() {
+  // Flash while the shield is up.
+  if (ship.invuln > 0 && Math.floor(ship.invuln * 10) % 2 === 0) return;
+
+  ctx.save();
+  ctx.translate(ship.x, ship.y);
+  ctx.rotate(ship.angle);
+
+  ctx.beginPath();
+  for (let i = 0; i < SHIP_SHAPE.length; i++) {
+    const p = SHIP_SHAPE[i];
+    if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+  }
+  ctx.closePath();
+  ctx.stroke();
+
+  // Flickering thrust flame.
+  if (ship.thrusting && Math.random() > 0.25) {
+    ctx.beginPath();
+    ctx.moveTo(-6, -4);
+    ctx.lineTo(-16 - Math.random() * 6, 0);
+    ctx.lineTo(-6, 4);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawAsteroid(a) {
+  ctx.save();
+  ctx.translate(a.x, a.y);
+  ctx.rotate(a.rot);
+  ctx.beginPath();
+  for (let i = 0; i < a.verts.length; i++) {
+    const v = a.verts[i];
+    const px = Math.cos(v.a) * v.d;
+    const py = Math.sin(v.a) * v.d;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawTrail() {
+  if (trail.length < 2) return;
+  ctx.shadowBlur = 0;
+  ctx.lineCap = "round";
+  for (let i = 1; i < trail.length; i++) {
+    const a = trail[i - 1], b = trail[i];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    if (dx * dx + dy * dy > 80 * 80) continue; // skip the jump when the ship wraps or hyperjumps
+    const t = ((a.life + b.life) * 0.5) / TRAIL_TIME; // 1 near the ship, 0 as it fades
+    ctx.strokeStyle = "rgba(150,195,255," + (t * 0.55).toFixed(3) + ")";
+    ctx.lineWidth = 0.5 + t * 2.2; // tapers thinner as it trails off
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+  }
+}
+
+function render() {
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, W, H);
+
+  // The vapor trail sits behind everything else.
+  drawTrail();
+
+  // Vector entities share a soft glow.
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.lineWidth = 1.6;
+  ctx.strokeStyle = "#e7ecf5";
+  ctx.shadowColor = "rgba(140,185,255,0.9)";
+  ctx.shadowBlur = 8;
+
+  for (const a of asteroids) drawAsteroid(a);
+
+  ctx.fillStyle = "#ffffff";
+  for (const b of bullets) {
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, 2.2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  if (ship.alive) drawShip();
+
+  // Particles drawn flat for performance.
+  ctx.shadowBlur = 0;
+  for (const p of particles) {
+    const alpha = Math.max(0, p.life / p.max);
+    ctx.fillStyle = "rgba(230,238,255," + alpha.toFixed(3) + ")";
+    ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
+  }
+
+  scoreEl.textContent = String(score);
+  waveEl.textContent = "WAVE " + wave;
+  pausedEl.style.display = paused ? "flex" : "none";
+}
+
+// ---- Main loop ----------------------------------------------------------
+let last = performance.now();
+function loop(now) {
+  let dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.05) dt = 0.05; // avoid a huge jump after the tab was hidden
+  if (!paused) {
+    update(dt);
+  } else {
+    setThrustSound(false); // silence the thruster while paused
+  }
+  render();
+  requestAnimationFrame(loop);
+}
+
+// Silence the thruster if the tab loses focus mid-burn.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) setThrustSound(false);
+});
+
+resetGame();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
