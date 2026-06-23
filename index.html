@@ -53,6 +53,17 @@
   #friction.off { color: #b9c6dd; border-color: rgba(160,190,230,0.45); }
   #friction.off:hover { background: rgba(160,190,230,0.18); }
 
+  #clear {
+    position: fixed; top: 90px; right: 16px; z-index: 6;
+    pointer-events: auto;
+    background: rgba(255,255,255,0.05);
+    border: 1.5px solid rgba(160,190,230,0.45);
+    color: #cfd8e6; font-family: inherit; font-size: 12px; letter-spacing: 2px;
+    padding: 7px 12px; border-radius: 8px; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #clear:hover { background: rgba(160,190,230,0.18); }
+
   #hint {
     position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
     color: #5f6a7c; font-size: 12px; letter-spacing: 1px; text-align: center;
@@ -97,8 +108,9 @@
 
   <button id="mute" aria-label="Toggle sound">SOUND ON</button>
   <button id="friction" aria-label="Toggle friction">FRICTION ON</button>
+  <button id="clear" aria-label="Clear trails">CLEAR TRAILS</button>
 
-  <div id="hint">ROTATE &larr; &rarr; &nbsp; THRUST &uarr; &nbsp; FIRE SPACE &nbsp; HYPERSPACE H &nbsp; PAUSE P &nbsp; MUTE M &nbsp; FRICTION F</div>
+  <div id="hint">ROTATE &larr; &rarr; &nbsp; THRUST &uarr; &nbsp; FIRE SPACE &nbsp; HYPERSPACE H &nbsp; PAUSE P &nbsp; MUTE M &nbsp; FRICTION F &nbsp; CLEAR C</div>
   <div id="paused">PAUSED</div>
 
   <div id="touch">
@@ -124,6 +136,7 @@ const waveEl = document.getElementById("wave");
 const pausedEl = document.getElementById("paused");
 const muteEl = document.getElementById("mute");
 const frictionEl = document.getElementById("friction");
+const clearEl = document.getElementById("clear");
 let W = 0, H = 0;
 
 function resize() {
@@ -141,18 +154,18 @@ window.addEventListener("resize", resize);
 resize();
 
 // ---- Tunable constants --------------------------------------------------
-const ROT_SPEED = 4.4;     // radians per second
-const THRUST = 280;        // acceleration, pixels per second squared
+const ROT_SPEED = 2.2;     // radians per second
+const THRUST = 100;        // acceleration, pixels per second squared
 const FRICTION = 0.5;      // velocity damping per second
-const MAX_SPEED = 480;     // pixels per second cap
+const MAX_SPEED = 100000;  // pixels per second cap
 const BULLET_SPEED = 520;  // muzzle speed, pixels per second
-const BULLET_LIFE = 2;     // seconds before a shot fades
+const BULLET_LIFE = 1.2;     // seconds before a shot fades
 const FIRE_DELAY = 0.01;   // seconds between shots
 const MAX_BULLETS = 500;   // shots allowed on screen at once
 const SHIP_BOUND = 15;     // ship bounding radius (nose reach), used for broad-phase
 const INVULN_TIME = 2.5;   // shield duration after respawn
 const RESPAWN_DELAY = 1.4; // seconds dead before respawning
-const TRAIL_TIME = 10.0;    // seconds the ship's vapor trail lingers
+const TRAIL_TIME = 100.0;   // seconds the ship's vapor trail lingers
 const BOOSTER_X = 0;        // trail emission offset behind ship in local x (0 keeps it at center)
 const ASTEROID_NOTCH = 0.4; // share of rock vertices cut into deep concave notches
 
@@ -280,6 +293,10 @@ function setFriction(on) {
   frictionEl.classList.toggle("off", !frictionOn);
 }
 
+function clearTrail() {
+  trail.length = 0;
+}
+
 // The signature two-tone beat speeds up as the field is cleared.
 let beatAccum = 0;
 let beatHigh = false;
@@ -393,6 +410,7 @@ window.addEventListener("keydown", (e) => {
   if (e.code === "KeyP") paused = !paused;
   if (e.code === "KeyM") setMuted(!muted);
   if (e.code === "KeyF") setFriction(!frictionOn);
+  if (e.code === "KeyC") clearTrail();
   keys[e.code] = true;
 });
 window.addEventListener("keyup", (e) => { keys[e.code] = false; });
@@ -417,6 +435,7 @@ if (hyperBtn) hyperBtn.addEventListener("pointerdown", (e) => { e.preventDefault
 
 muteEl.addEventListener("click", () => { resumeAudio(); setMuted(!muted); });
 frictionEl.addEventListener("click", () => setFriction(!frictionOn));
+clearEl.addEventListener("click", clearTrail);
 
 function hyperspace() {
   if (!ship.alive) return;
