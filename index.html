@@ -40,6 +40,19 @@
   #mute:hover { background: rgba(160,190,230,0.18); }
   #mute.off { color: #7a8494; border-color: rgba(160,190,230,0.25); }
 
+  #friction {
+    position: fixed; top: 52px; right: 16px; z-index: 6;
+    pointer-events: auto;
+    background: rgba(255,255,255,0.05);
+    border: 1.5px solid rgba(255,120,110,0.5);
+    color: #ffb0a8; font-family: inherit; font-size: 12px; letter-spacing: 2px;
+    padding: 7px 12px; border-radius: 8px; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #friction:hover { background: rgba(255,120,110,0.15); }
+  #friction.off { color: #b9c6dd; border-color: rgba(160,190,230,0.45); }
+  #friction.off:hover { background: rgba(160,190,230,0.18); }
+
   #hint {
     position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
     color: #5f6a7c; font-size: 12px; letter-spacing: 1px; text-align: center;
@@ -83,8 +96,9 @@
   </div>
 
   <button id="mute" aria-label="Toggle sound">SOUND ON</button>
+  <button id="friction" aria-label="Toggle friction">FRICTION ON</button>
 
-  <div id="hint">ROTATE &larr; &rarr; &nbsp; THRUST &uarr; &nbsp; FIRE SPACE &nbsp; HYPERSPACE H &nbsp; PAUSE P &nbsp; MUTE M</div>
+  <div id="hint">ROTATE &larr; &rarr; &nbsp; THRUST &uarr; &nbsp; FIRE SPACE &nbsp; HYPERSPACE H &nbsp; PAUSE P &nbsp; MUTE M &nbsp; FRICTION F</div>
   <div id="paused">PAUSED</div>
 
   <div id="touch">
@@ -109,6 +123,7 @@ const scoreEl = document.getElementById("score");
 const waveEl = document.getElementById("wave");
 const pausedEl = document.getElementById("paused");
 const muteEl = document.getElementById("mute");
+const frictionEl = document.getElementById("friction");
 let W = 0, H = 0;
 
 function resize() {
@@ -123,7 +138,7 @@ function resize() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 window.addEventListener("resize", resize);
-resize(); 
+resize();
 
 // ---- Tunable constants --------------------------------------------------
 const ROT_SPEED = 4.4;     // radians per second
@@ -131,14 +146,15 @@ const THRUST = 280;        // acceleration, pixels per second squared
 const FRICTION = 0.5;      // velocity damping per second
 const MAX_SPEED = 480;     // pixels per second cap
 const BULLET_SPEED = 520;  // muzzle speed, pixels per second
-const BULLET_LIFE = 2;   // seconds before a shot fades
+const BULLET_LIFE = 2;     // seconds before a shot fades
 const FIRE_DELAY = 0.01;   // seconds between shots
-const MAX_BULLETS = 500;     // shots allowed on screen at once
+const MAX_BULLETS = 500;   // shots allowed on screen at once
 const SHIP_BOUND = 15;     // ship bounding radius (nose reach), used for broad-phase
 const INVULN_TIME = 2.5;   // shield duration after respawn
 const RESPAWN_DELAY = 1.4; // seconds dead before respawning
-const TRAIL_TIME = 20.0;     // seconds the ship's vapor trail lingers
-const ASTEROID_NOTCH = 0.2; // share of rock vertices cut into deep concave notches
+const TRAIL_TIME = 10.0;    // seconds the ship's vapor trail lingers
+const BOOSTER_X = 0;        // trail emission offset behind ship in local x (0 keeps it at center)
+const ASTEROID_NOTCH = 0.4; // share of rock vertices cut into deep concave notches
 
 const SIZE_RADIUS = { 3: 48, 2: 26, 1: 14 };
 const SIZE_SCORE  = { 3: 20, 2: 50, 1: 100 };
@@ -154,7 +170,7 @@ const SHIP_SHAPE = [
 
 // ---- Game state ---------------------------------------------------------
 let ship, bullets, asteroids, particles, trail;
-let score = 0, wave = 0, fireCooldown = 0, paused = false;
+let score = 0, wave = 0, fireCooldown = 0, paused = false, frictionOn = true;
 
 function rand(min, max) { return min + Math.random() * (max - min); }
 
@@ -256,6 +272,12 @@ function setMuted(m) {
   if (thrustGain && actx) thrustGain.gain.setTargetAtTime(0, actx.currentTime, 0.02);
   muteEl.textContent = muted ? "SOUND OFF" : "SOUND ON";
   muteEl.classList.toggle("off", muted);
+}
+
+function setFriction(on) {
+  frictionOn = on;
+  frictionEl.textContent = frictionOn ? "FRICTION ON" : "FRICTION OFF";
+  frictionEl.classList.toggle("off", !frictionOn);
 }
 
 // The signature two-tone beat speeds up as the field is cleared.
@@ -370,6 +392,7 @@ window.addEventListener("keydown", (e) => {
   if (e.code === "KeyH") hyperspace();
   if (e.code === "KeyP") paused = !paused;
   if (e.code === "KeyM") setMuted(!muted);
+  if (e.code === "KeyF") setFriction(!frictionOn);
   keys[e.code] = true;
 });
 window.addEventListener("keyup", (e) => { keys[e.code] = false; });
@@ -393,6 +416,7 @@ const hyperBtn = document.getElementById("b-hyper");
 if (hyperBtn) hyperBtn.addEventListener("pointerdown", (e) => { e.preventDefault(); resumeAudio(); hyperspace(); });
 
 muteEl.addEventListener("click", () => { resumeAudio(); setMuted(!muted); });
+frictionEl.addEventListener("click", () => setFriction(!frictionOn));
 
 function hyperspace() {
   if (!ship.alive) return;
@@ -512,10 +536,12 @@ function update(dt) {
       ship.vy += Math.sin(ship.angle) * THRUST * dt;
     }
 
-    // Mild drag, then clamp top speed.
-    const damp = Math.exp(-FRICTION * dt);
-    ship.vx *= damp;
-    ship.vy *= damp;
+    // Optional drag (toggle with F), then clamp top speed.
+    if (frictionOn) {
+      const damp = Math.exp(-FRICTION * dt);
+      ship.vx *= damp;
+      ship.vy *= damp;
+    }
     const sp = Math.hypot(ship.vx, ship.vy);
     if (sp > MAX_SPEED) {
       ship.vx = ship.vx / sp * MAX_SPEED;
@@ -525,8 +551,9 @@ function update(dt) {
     ship.x += ship.vx * dt;
     ship.y += ship.vy * dt;
     wrap(ship);
-    // Record the path for the vapor trail.
-    trail.push({ x: ship.x, y: ship.y, life: TRAIL_TIME });
+    // Record a trail point, tagged with the current friction mode for its color.
+    const bc = Math.cos(ship.angle), bs = Math.sin(ship.angle);
+    trail.push({ x: ship.x + BOOSTER_X * bc, y: ship.y + BOOSTER_X * bs, life: TRAIL_TIME, fr: frictionOn });
 
     fireCooldown -= dt;
     if (keys.Space && fireCooldown <= 0 && bullets.length < MAX_BULLETS) {
@@ -667,12 +694,16 @@ function drawTrail() {
   if (trail.length < 2) return;
   ctx.shadowBlur = 0;
   ctx.lineCap = "round";
+  const FRICTION_RGB = "255,90,80", FREE_RGB = "150,195,255"; // red with friction, blue without
   for (let i = 1; i < trail.length; i++) {
     const a = trail[i - 1], b = trail[i];
     const dx = b.x - a.x, dy = b.y - a.y;
     if (dx * dx + dy * dy > 80 * 80) continue; // skip the jump when the ship wraps or hyperjumps
     const t = ((a.life + b.life) * 0.5) / TRAIL_TIME; // 1 near the ship, 0 as it fades
-    ctx.strokeStyle = "rgba(150,195,255," + (t * 0.55).toFixed(3) + ")";
+    // Each segment keeps the color of the mode it was made in, so toggling
+    // friction leaves a mixed red and blue trail instead of recoloring all of it.
+    const rgb = a.fr ? FRICTION_RGB : FREE_RGB;
+    ctx.strokeStyle = "rgba(" + rgb + "," + (t * 0.55).toFixed(3) + ")";
     ctx.lineWidth = 0.5 + t * 2.2; // tapers thinner as it trails off
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
