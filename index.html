@@ -154,12 +154,21 @@ window.addEventListener("resize", resize);
 resize();
 
 // ---- Tunable constants --------------------------------------------------
-const ROT_SPEED = 2.2;     // radians per second
-const THRUST = 100;        // acceleration, pixels per second squared
-const FRICTION = 0.5;      // velocity damping per second
+// Ship dynamics from the kinematic theory of rapid movements. Holding a control
+// emits a stroke train spaced STROKE_ISI apart, each stroke a lognormal pulse.
+// Thrust strokes are integrated as acceleration into a persistent velocity, so
+// the ship keeps Newtonian momentum and slides. Turn strokes are summed as
+// angular velocity, so rotation stays responsive and settles when released.
+const LN_MU = -1.9;        // lognormal log-time delay (mu), sets the time scale
+const LN_SIGMA = 0.35;     // lognormal log-response time (sigma), sets the skew
+const STROKE_ISI = 0.05;   // seconds between strokes while a control is held
+const THRUST_D = 5;        // velocity added per thrust stroke in px/s (lognormal acceleration)
+const TURN_D = 0.11;       // angle per turn stroke in radians
+const STROKE_MAX = 1.2;    // seconds before a spent stroke is retired
+const FRICTION = 0.5;      // velocity drag (translation), stroke decay (rotation), when friction on (F)
 const MAX_SPEED = 100000;  // pixels per second cap
 const BULLET_SPEED = 520;  // muzzle speed, pixels per second
-const BULLET_LIFE = 1.2;     // seconds before a shot fades
+const BULLET_LIFE = 1.2;   // seconds before a shot fades
 const FIRE_DELAY = 0.01;   // seconds between shots
 const MAX_BULLETS = 500;   // shots allowed on screen at once
 const SHIP_BOUND = 15;     // ship bounding radius (nose reach), used for broad-phase
@@ -183,6 +192,8 @@ const SHIP_SHAPE = [
 
 // ---- Game state ---------------------------------------------------------
 let ship, bullets, asteroids, particles, trail;
+let thrustStrokes = [], turnStrokes = [];
+let thrustAccum = STROKE_ISI, leftAccum = STROKE_ISI, rightAccum = STROKE_ISI;
 let score = 0, wave = 0, fireCooldown = 0, paused = false, frictionOn = true;
 
 function rand(min, max) { return min + Math.random() * (max - min); }
@@ -268,7 +279,7 @@ function noise(dur, gain, filterFreq, filterType) {
 }
 
 // Individual game sounds.
-function fireSound() { tone(720, 0.12, "square", 0.10, 180); }
+function fireSound() { noise(0.03, 0.18, 1500, "bandpass"); } // soft tick, same noise-burst family as the pop
 function bang(size) { noise(0.18 + size * 0.09, 0.35, 300 + (3 - size) * 360, "lowpass"); }
 function shipBoom() { noise(0.6, 0.4, 700, "lowpass"); tone(180, 0.5, "sawtooth", 0.18, 45); }
 function hyperSound() { tone(300, 0.25, "sine", 0.16, 1500); noise(0.2, 0.1, 1200, "bandpass"); }
@@ -393,6 +404,9 @@ function resetGame() {
   particles = [];
   asteroids = [];
   trail = [];
+  thrustStrokes.length = 0;
+  turnStrokes.length = 0;
+  thrustAccum = leftAccum = rightAccum = STROKE_ISI;
   score = 0;
   wave = 0;
   spawnWave();
@@ -443,6 +457,8 @@ function hyperspace() {
   ship.y = rand(0, H);
   ship.vx = 0;
   ship.vy = 0;
+  thrustStrokes.length = 0;
+  turnStrokes.length = 0;
   ship.invuln = Math.max(ship.invuln, 1.0);
   hyperSound();
 }
@@ -470,6 +486,8 @@ function shipHit() {
   ship.alive = false;
   ship.thrusting = false;
   ship.respawn = RESPAWN_DELAY;
+  thrustStrokes.length = 0;
+  turnStrokes.length = 0;
 }
 
 // ---- Collision geometry -------------------------------------------------
@@ -543,19 +561,76 @@ function shipCollides() {
   return false;
 }
 
+// ---- Ship dynamics (kinematic theory of rapid movements) ----------------
+// Holding thrust or a turn key emits a train of strokes spaced STROKE_ISI
+// apart. Each stroke contributes a lognormal velocity profile in time, and the
+// ship's (angular) velocity is the vector sum of every active stroke. When the
+// controls release, the strokes decay and the ship settles to rest, the
+// characteristic accelerate-then-decelerate signature of the theory.
+
+function lognorm(age) {
+  // Lognormal velocity profile from the kinematic theory of rapid movements.
+  if (age <= 0) return 0;
+  const u = Math.log(age) - LN_MU;
+  return Math.exp(-(u * u) / (2 * LN_SIGMA * LN_SIGMA)) / (LN_SIGMA * Math.sqrt(2 * Math.PI) * age);
+}
+
+function strokeWeight(age) {
+  // Rotation profile: the lognormal with an optional decay envelope (friction).
+  let w = lognorm(age);
+  if (frictionOn) w *= Math.exp(-FRICTION * age);
+  return w;
+}
+
+function stepStrokes(held, accum, dt, emit) {
+  if (!held) return STROKE_ISI; // primed so the next press fires a stroke at once
+  accum += dt;
+  while (accum >= STROKE_ISI) { emit(); accum -= STROKE_ISI; }
+  return accum;
+}
+
+function emitStrokes(dt) {
+  const left = !!(keys.ArrowLeft || keys.KeyA);
+  const right = !!(keys.ArrowRight || keys.KeyD);
+  const thrust = !!(keys.ArrowUp || keys.KeyW);
+  leftAccum = stepStrokes(left, leftAccum, dt, () => turnStrokes.push({ age: 0, D: TURN_D, sign: -1 }));
+  rightAccum = stepStrokes(right, rightAccum, dt, () => turnStrokes.push({ age: 0, D: TURN_D, sign: 1 }));
+  thrustAccum = stepStrokes(thrust, thrustAccum, dt, () => {
+    thrustStrokes.push({ age: 0, D: THRUST_D, dx: Math.cos(ship.angle), dy: Math.sin(ship.angle) });
+  });
+}
+
+function advanceStrokes(dt) {
+  for (const s of thrustStrokes) s.age += dt;
+  for (const s of turnStrokes) s.age += dt;
+  for (let i = thrustStrokes.length - 1; i >= 0; i--) if (thrustStrokes[i].age > STROKE_MAX) thrustStrokes.splice(i, 1);
+  for (let i = turnStrokes.length - 1; i >= 0; i--) if (turnStrokes[i].age > STROKE_MAX) turnStrokes.splice(i, 1);
+}
+
 // ---- Update -------------------------------------------------------------
 function update(dt) {
   if (ship.alive) {
-    if (keys.ArrowLeft || keys.KeyA) ship.angle -= ROT_SPEED * dt;
-    if (keys.ArrowRight || keys.KeyD) ship.angle += ROT_SPEED * dt;
+    // Emit and age the lognormal strokes (kinematic theory of rapid movements).
+    emitStrokes(dt);
+    advanceStrokes(dt);
 
-    ship.thrusting = !!(keys.ArrowUp || keys.KeyW);
-    if (ship.thrusting) {
-      ship.vx += Math.cos(ship.angle) * THRUST * dt;
-      ship.vy += Math.sin(ship.angle) * THRUST * dt;
+    // Rotation: angular velocity is the sum of the turn strokes' lognormal
+    // profiles, so it settles to rest shortly after the key is released.
+    let omega = 0;
+    for (const s of turnStrokes) omega += s.D * s.sign * strokeWeight(s.age);
+    ship.angle += omega * dt;
+
+    // Thrust: each stroke's lognormal is an acceleration integrated into a
+    // persistent velocity, so the ship carries momentum and slides. Friction,
+    // when on, is real drag on that velocity.
+    let ax = 0, ay = 0;
+    for (const s of thrustStrokes) {
+      const a = s.D * lognorm(s.age);
+      ax += a * s.dx;
+      ay += a * s.dy;
     }
-
-    // Optional drag (toggle with F), then clamp top speed.
+    ship.vx += ax * dt;
+    ship.vy += ay * dt;
     if (frictionOn) {
       const damp = Math.exp(-FRICTION * dt);
       ship.vx *= damp;
@@ -566,6 +641,7 @@ function update(dt) {
       ship.vx = ship.vx / sp * MAX_SPEED;
       ship.vy = ship.vy / sp * MAX_SPEED;
     }
+    ship.thrusting = !!(keys.ArrowUp || keys.KeyW);
 
     ship.x += ship.vx * dt;
     ship.y += ship.vy * dt;
@@ -588,6 +664,8 @@ function update(dt) {
       ship.angle = -Math.PI / 2;
       ship.alive = true;
       ship.invuln = INVULN_TIME;
+      thrustStrokes.length = 0; turnStrokes.length = 0;
+      thrustAccum = leftAccum = rightAccum = STROKE_ISI;
     }
   }
 
