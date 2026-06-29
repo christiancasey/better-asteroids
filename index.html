@@ -157,8 +157,9 @@ resize();
 // Ship dynamics from the kinematic theory of rapid movements. Holding a control
 // emits a stroke train spaced STROKE_ISI apart, each stroke a lognormal pulse.
 // Thrust strokes are integrated as acceleration into a persistent velocity, so
-// the ship keeps Newtonian momentum and slides. Turn strokes are summed as
-// angular velocity, so rotation stays responsive and settles when released.
+// the ship keeps Newtonian momentum and slides. Rotation comes from paired
+// thrusters acting as a couple about the center of mass, so the ship rotates in
+// place; its angular velocity is the summed lognormal of the turn strokes.
 const LN_MU = -1.9;        // lognormal log-time delay (mu), sets the time scale
 const LN_SIGMA = 0.35;     // lognormal log-response time (sigma), sets the skew
 const STROKE_ISI = 0.05;   // seconds between strokes while a control is held
@@ -341,6 +342,7 @@ function newShip() {
     angle: -Math.PI / 2, // nose pointing up
     alive: true,
     thrusting: false,
+    turnDir: 0,
     invuln: INVULN_TIME,
     respawn: 0,
   };
@@ -614,14 +616,15 @@ function update(dt) {
     emitStrokes(dt);
     advanceStrokes(dt);
 
-    // Rotation: angular velocity is the sum of the turn strokes' lognormal
-    // profiles, so it settles to rest shortly after the key is released.
+    // Rotation comes from paired thrusters acting as a couple about the center
+    // of mass: pure torque, no net force, so the ship rotates in place. Angular
+    // velocity is the lognormal sum of the turn strokes.
     let omega = 0;
     for (const s of turnStrokes) omega += s.D * s.sign * strokeWeight(s.age);
     ship.angle += omega * dt;
 
-    // Thrust: each stroke's lognormal is an acceleration integrated into a
-    // persistent velocity, so the ship carries momentum and slides. Friction,
+    // Thrust: each forward stroke's lognormal is integrated as acceleration into
+    // a persistent velocity, so the ship carries momentum and slides. Friction,
     // when on, is real drag on that velocity.
     let ax = 0, ay = 0;
     for (const s of thrustStrokes) {
@@ -642,6 +645,7 @@ function update(dt) {
       ship.vy = ship.vy / sp * MAX_SPEED;
     }
     ship.thrusting = !!(keys.ArrowUp || keys.KeyW);
+    ship.turnDir = (keys.ArrowRight || keys.KeyD ? 1 : 0) - (keys.ArrowLeft || keys.KeyA ? 1 : 0);
 
     ship.x += ship.vx * dt;
     ship.y += ship.vy * dt;
@@ -766,6 +770,23 @@ function drawShip() {
     ctx.moveTo(-6, -4);
     ctx.lineTo(-16 - Math.random() * 6, 0);
     ctx.lineTo(-6, 4);
+    ctx.stroke();
+  }
+
+  // Control thrusters: two diagonal pairs forming a couple that spins the ship
+  // in place. A right turn fires front-left with rear-right, a left turn the
+  // opposite pair, each exhaust pointing outward perpendicular to the hull.
+  if (ship.turnDir !== 0 && Math.random() > 0.25) {
+    const f = ship.turnDir > 0 ? -1 : 1; // exhaust side at the front
+    ctx.beginPath();                     // front thruster
+    ctx.moveTo(2.5, 4 * f);
+    ctx.lineTo(5, (10 + Math.random() * 3) * f);
+    ctx.lineTo(7.5, 4 * f);
+    ctx.stroke();
+    ctx.beginPath();                     // rear thruster, opposite corner
+    ctx.moveTo(-10.5, -7 * f);
+    ctx.lineTo(-8, (-13 - Math.random() * 3) * f);
+    ctx.lineTo(-5.5, -7 * f);
     ctx.stroke();
   }
   ctx.restore();
