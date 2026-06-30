@@ -376,7 +376,7 @@ function makeAsteroid(x, y, size) {
 
 function spawnWave() {
   wave++;
-  const count = Math.min(3 + wave, 9);
+  const count = 3 + wave; // one more asteroid each wave, uncapped
   asteroids = [];
   for (let i = 0; i < count; i++) {
     // Keep new rocks away from the ship's start position.
